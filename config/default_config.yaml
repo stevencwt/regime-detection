@@ -1,0 +1,156 @@
+# =============================================================================
+# Regime Detection Module — Default Configuration (v3.1)
+# =============================================================================
+# This config defines all thresholds, lookback windows, and activation rules
+# for the Multi-Modal Market Regime Analysis Framework.
+#
+# Override any value by providing your own YAML path to RegimeManager().
+# =============================================================================
+
+# --- Global Settings --------------------------------------------------------
+version: "3.1"
+log_level: "INFO"                    # DEBUG | INFO | WARNING | ERROR
+
+# --- Temporal & Lookback Matrix (Section 3 of spec) -------------------------
+# Each strategy type has its own signal/execution timeframes and lookbacks.
+# The RegimeManager uses these to interpret incoming bar data correctly.
+temporal_matrix:
+  scalping:
+    crypto:
+      regime_signal_tf: "5m"
+      execution_tf: "1m"
+      lookback_bars: 750
+      hmm_stability_bars: 2
+    us_stocks:
+      regime_signal_tf: "5m"
+      execution_tf: "1m"
+      lookback_bars: 500
+      hmm_stability_bars: 3
+
+  range_trading:
+    crypto:
+      regime_signal_tf: "15m"
+      execution_tf: "5m"
+      lookback_bars: 1000
+      hmm_stability_bars: 3
+    us_stocks:
+      regime_signal_tf: "1h"
+      execution_tf: "15m"
+      lookback_bars: 800
+      hmm_stability_bars: 4
+
+  swing:
+    crypto:
+      regime_signal_tf: "1h"
+      execution_tf: "15m"
+      lookback_bars: 1000
+      hmm_stability_bars: 3
+    us_stocks:
+      regime_signal_tf: "1h"
+      execution_tf: "15m"
+      lookback_bars: 800
+      hmm_stability_bars: 4
+
+  options_income:
+    us_stocks:
+      regime_signal_tf: "1d"
+      execution_tf: "1d"
+      lookback_bars: 252
+      hmm_stability_bars: 5
+
+  options_speculative:
+    us_stocks:
+      regime_signal_tf: "1d"
+      execution_tf: "30m"
+      lookback_bars: 252
+      hmm_stability_bars: 4
+
+  pairs_trading:
+    crypto:
+      regime_signal_tf: "15m"
+      execution_tf: "5m"
+      lookback_bars: 1000
+      hmm_stability_bars: 3
+
+# --- HMM (Hidden Markov Model) Settings ------------------------------------
+hmm:
+  n_states: 3                        # BULL / BEAR / CHOP
+  covariance_type: "full"
+  n_iter: 50
+  random_state: 42
+  min_training_bars: 100             # minimum bars before HMM produces output
+
+# --- DFA Hurst Exponent Settings --------------------------------------------
+hurst:
+  # DFA computation via fathon
+  min_window: 10
+  max_window_ratio: 0.25             # max_window = floor(len(series) * ratio)
+  order: 1                           # polynomial order for DFA
+
+  # Regime thresholds (Section 4 of spec)
+  trending_threshold: 0.60           # H >= 0.60 → trending
+  mean_reverting_threshold: 0.40     # H <= 0.40 → strong mean-reversion
+  random_walk_center: 0.50
+
+  # Range trading sweet spot
+  range_min_hurst: 0.48
+  range_max_hurst: 0.58
+
+# --- Change Point Detection (CPD) Settings ----------------------------------
+cpd:
+  model: "rbf"                       # kernel for ruptures
+  penalty: 5.0                       # β = 5.0 (BinSeg)
+  min_size: 20                       # minimum segment length
+  lookback_bars: 200                 # window for CPD analysis
+  recency_bars: 5                    # break within last N bars → structural_break = true
+
+# --- Volatility Regime Classification ----------------------------------------
+volatility:
+  window: 20                         # rolling std window (bars)
+  expanding_threshold: 1.5           # current_vol / median_vol > X → EXPANDING
+  contracting_threshold: 0.6         # current_vol / median_vol < X → CONTRACTING
+  stable_band: [0.7, 1.3]           # within band → LOW_STABLE or MODERATE
+  low_stable_percentile: 40          # vol below Nth percentile of history → LOW_STABLE
+
+# --- Liquidity / Order Book Heuristic ----------------------------------------
+liquidity:
+  imbalance_trap_threshold: 0.7      # |imbalance| > X → LIQUIDITY_TRAP
+  consolidation_band: [-0.3, 0.3]    # within band → CONSOLIDATION
+  passed_threshold: 0.0              # default: any non-extreme → PASSED
+
+# --- Funding Rate Bias (Crypto-specific) ------------------------------------
+funding:
+  extreme_positive: 0.01             # >= 1 bps → strong positive bias
+  extreme_negative: -0.01            # <= -1 bps → strong negative bias
+  neutral_band: [-0.005, 0.005]      # within band → NEUTRAL funding
+
+# --- Range Detection Settings -----------------------------------------------
+range_detection:
+  enabled: true
+  channel_type: "donchian"           # donchian | keltner
+  channel_period: 30                 # bars for channel calculation
+  min_bars_persistence: 10           # price must stay inside channel for N bars
+  deviation_entry_threshold: 1.5     # SD from range mean for entry hint
+  target_range_capture_pct: 0.6      # target 60% of range width
+
+# --- Regime Shift / Exit Mandate Settings -----------------------------------
+exit_mandate:
+  enabled: true
+  grace_bars: 2                      # confirm regime shift for N bars before mandate
+  triggers:
+    - "hurst_above_trending"         # Hurst > trending_threshold
+    - "cpd_structural_break"         # CPD fires
+    - "volatility_expanding"         # vol regime → EXPANDING
+    - "hmm_state_change"             # HMM label change held for stability bars
+
+# --- Options Context (US Stocks only) ----------------------------------------
+options:
+  vanna_threshold: 0.3               # |vanna_signal| > X → meaningful
+  gamma_flip_enabled: true
+  oi_skew_lookback: 5                # bars to smooth OI skew
+
+# --- Pairs Trading Context --------------------------------------------------
+pairs:
+  spread_hurst_window: 200           # DFA window on spread series
+  spread_half_life_max: 50           # max half-life (bars) for valid pair
+  cointegration_pvalue: 0.05         # ADF p-value threshold
