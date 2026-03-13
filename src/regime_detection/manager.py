@@ -9,14 +9,9 @@ This is the single entry-point that downstream bots interact with:
     if manager.get_current_regime()["exit_mandate"]:
         # close all positions ...
 
-Phase 1 implements:
-  - Config loading & validation
-  - Bar buffer management (FIFO ring for lookback)
-  - .update() signature with all data inputs
-  - .get_json() and .get_current_regime() returning v3.1 schema
-  - Placeholder hooks for Phase 2+ signal functions
-
-Phase 2+ will fill in the actual HMM, Hurst, CPD, etc.
+Phase 1: Config, schema, bar buffer, .update()/.get_json() skeleton.
+Phase 2: Core signals wired — HMM, DFA Hurst, CPD, volatility, liquidity, funding.
+Phase 3+: Market-specific processors, consensus voting, range vs scalp.
 """
 
 from __future__ import annotations
@@ -26,6 +21,8 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import numpy as np
 
 from regime_detection.config import load_config, validate_config
 from regime_detection.schema import (
@@ -43,6 +40,14 @@ from regime_detection.schema import (
     Signals,
     VolatilityRegime,
     make_default_output,
+)
+from regime_detection.signals import (
+    classify_funding_bias,
+    classify_liquidity,
+    classify_volatility,
+    compute_cpd,
+    compute_hmm_labels,
+    compute_hurst_dfa,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +139,10 @@ class RegimeManager:
 
         # --- Update counter ---
         self._tick_count: int = 0
+
+        # --- HMM state tracking (Phase 2) ---
+        self._hmm_last_label: str = "UNKNOWN"
+        self._hmm_confidence: float = 0.0
 
         logger.info(
             "RegimeManager initialized | market=%s strategy=%s/%s lookback=%d",
@@ -310,30 +319,68 @@ class RegimeManager:
         return self._current_output.to_json(indent=indent)
 
     # ------------------------------------------------------------------
-    # Signal computation stubs (Phase 2 will implement)
+    # Signal computation (Phase 2 — live implementations)
     # ------------------------------------------------------------------
 
     def _compute_hmm(self) -> HMMLabel:
-        """Placeholder — returns UNKNOWN until Phase 2."""
-        return HMMLabel.UNKNOWN
+        """Fit GaussianHMM to close prices, return stable label."""
+        closes = np.array(self._close_buffer, dtype=float)
+        hmm_cfg = self._cfg.get("hmm", {})
+        stability_bars = self._temporal.get("hmm_stability_bars", 2)
+
+        label_str, _states, confidence = compute_hmm_labels(
+            closes, hmm_cfg, stability_bars
+        )
+        self._hmm_last_label = label_str
+        self._hmm_confidence = confidence
+
+        try:
+            return HMMLabel(label_str)
+        except ValueError:
+            return HMMLabel.UNKNOWN
 
     def _compute_hurst(self) -> Optional[float]:
-        """Placeholder — returns None until Phase 2."""
-        return None
+        """Compute DFA Hurst exponent from close buffer."""
+        closes = np.array(self._close_buffer, dtype=float)
+        hurst_cfg = self._cfg.get("hurst", {})
+
+        if len(closes) < 30:
+            return None
+
+        value = compute_hurst_dfa(closes, hurst_cfg)
+        return round(value, 4)
 
     def _compute_cpd(self) -> bool:
-        """Placeholder — returns False until Phase 2."""
-        return False
+        """Detect structural breaks via BinSeg CPD."""
+        closes = np.array(self._close_buffer, dtype=float)
+        cpd_cfg = self._cfg.get("cpd", {})
+
+        structural_break, _breakpoints = compute_cpd(closes, cpd_cfg)
+        return structural_break
 
     def _compute_volatility_regime(self) -> VolatilityRegime:
-        """Placeholder — returns UNKNOWN until Phase 2."""
-        return VolatilityRegime.UNKNOWN
+        """Classify current volatility from close buffer."""
+        closes = np.array(self._close_buffer, dtype=float)
+        vol_cfg = self._cfg.get("volatility", {})
+
+        label_str = classify_volatility(closes, vol_cfg)
+
+        try:
+            return VolatilityRegime(label_str)
+        except ValueError:
+            return VolatilityRegime.UNKNOWN
 
     def _compute_liquidity(
         self, order_book_imbalance: Optional[float]
     ) -> LiquidityStatus:
-        """Placeholder — returns UNKNOWN until Phase 2."""
-        return LiquidityStatus.UNKNOWN
+        """Classify liquidity from order-book imbalance."""
+        liq_cfg = self._cfg.get("liquidity", {})
+        label_str = classify_liquidity(order_book_imbalance, liq_cfg)
+
+        try:
+            return LiquidityStatus(label_str)
+        except ValueError:
+            return LiquidityStatus.UNKNOWN
 
     # ------------------------------------------------------------------
     # Market-specific processor stubs (Phase 3 will implement)
