@@ -206,11 +206,17 @@ def compute_hmm_labels(
       - State with lowest mean return  → BEAR
       - Middle state(s)                → CHOP
 
+    Robustness features:
+      - Near-zero variance detection → returns CHOP (market is flat/stale)
+      - Means-separation check → if all state means are nearly equal, returns CHOP
+      - Majority vote stability → uses most-common label over last N bars,
+        not unanimity (prevents oscillation-induced UNKNOWN)
+
     Parameters
     ----------
     closes : 1-D array of close prices
     cfg : hmm section of config dict
-    stability_bars : how many consecutive bars the current label must hold
+    stability_bars : window size for majority-vote stability check
 
     Returns
     -------
@@ -237,6 +243,14 @@ def compute_hmm_labels(
     if len(log_returns) < min_bars:
         return "UNKNOWN", np.array([]), 0.0
 
+    # --- Guard: near-zero variance (stale/flat data) ---
+    # When consecutive prices are identical (e.g., BBO polling), log-returns
+    # are ~0.0 and the HMM cannot differentiate states meaningfully.
+    return_std = np.std(log_returns)
+    if return_std < 1e-10:
+        logger.debug("HMM: near-zero return variance (%.2e) — defaulting to CHOP", return_std)
+        return "CHOP", np.array([]), 0.5
+
     X = log_returns.reshape(-1, 1)
 
     try:
@@ -258,6 +272,28 @@ def compute_hmm_labels(
 
     # --- Auto-label states by mean return ---
     means = model.means_.flatten()  # shape (n_states,)
+
+    # --- Guard: means separation check ---
+    # If all state means are nearly identical, the HMM cannot distinguish
+    # regimes — but the overall sign tells us direction.
+    means_range = np.max(means) - np.min(means)
+    if means_range < return_std * 0.1:
+        # Means are clustered — single regime in the data.
+        # Use the sign of the average mean to determine direction.
+        avg_mean = np.mean(means)
+        if avg_mean > return_std * 0.3:
+            fallback_label = "BULL"
+        elif avg_mean < -return_std * 0.3:
+            fallback_label = "BEAR"
+        else:
+            fallback_label = "CHOP"
+
+        logger.debug(
+            "HMM: state means not separated (range=%.2e, avg=%.2e) — using %s",
+            means_range, avg_mean, fallback_label,
+        )
+        return fallback_label, states, float(posteriors[-1, states[-1]])
+
     ranked = np.argsort(means)      # lowest → highest mean
 
     label_map = {}
@@ -269,12 +305,26 @@ def compute_hmm_labels(
     # Map state sequence to labels
     labeled_sequence = np.array([label_map[s] for s in states])
 
-    # --- Stability check ---
-    current_label = labeled_sequence[-1]
-    if len(labeled_sequence) >= stability_bars:
-        recent = labeled_sequence[-stability_bars:]
-        if not all(r == current_label for r in recent):
-            current_label = "UNKNOWN"  # not stable yet
+    # --- Stability check: majority vote over recent window ---
+    # Uses the most-common label in the last N bars instead of requiring
+    # all N bars to agree. This prevents oscillation-induced UNKNOWN.
+    vote_window = max(stability_bars, 5)  # minimum 5 bars for meaningful vote
+    if len(labeled_sequence) >= vote_window:
+        recent = labeled_sequence[-vote_window:]
+        # Count occurrences of each label
+        labels, counts = np.unique(recent, return_counts=True)
+        majority_idx = np.argmax(counts)
+        majority_label = labels[majority_idx]
+        majority_pct = counts[majority_idx] / len(recent)
+
+        # Require >50% majority for a definitive label
+        if majority_pct > 0.5:
+            current_label = majority_label
+        else:
+            # No clear majority — market is transitioning
+            current_label = "CHOP"  # default to CHOP when ambiguous
+    else:
+        current_label = labeled_sequence[-1]
 
     # Confidence = posterior probability of current state
     current_state_idx = states[-1]
