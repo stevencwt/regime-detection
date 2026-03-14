@@ -12,7 +12,7 @@ This is the single entry-point that downstream bots interact with:
 Phase 1: Config, schema, bar buffer, .update()/.get_json() skeleton.
 Phase 2: Core signals wired — HMM, DFA Hurst, CPD, volatility, liquidity, funding.
 Phase 3: Market processors (crypto, options, pairs) + consensus voting.
-Phase 4: Range vs scalp, range hints, exit mandate.
+Phase 4: Recommended logic (range vs scalp vs swing), range hints, exit mandate.
 """
 
 from __future__ import annotations
@@ -55,6 +55,12 @@ from regime_detection.processors import (
     process_options,
     process_pairs,
     vote_consensus,
+)
+from regime_detection.recommendation import (
+    compute_range_hints,
+    compute_range_persistence,
+    determine_recommended_logic,
+    evaluate_exit_mandate,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,6 +156,10 @@ class RegimeManager:
         # --- HMM state tracking (Phase 2) ---
         self._hmm_last_label: str = "UNKNOWN"
         self._hmm_confidence: float = 0.0
+
+        # --- Exit mandate state tracking (Phase 4) ---
+        self._previous_consensus: Optional[ConsensusState] = None
+        self._range_persistence: int = 0
 
         logger.info(
             "RegimeManager initialized | market=%s strategy=%s/%s lookback=%d",
@@ -282,15 +292,19 @@ class RegimeManager:
         )
 
         # --- Recommended logic (Phase 4: range vs scalp) ---
+        self._range_persistence = self._compute_range_persistence()
         recommended = self._determine_recommended_logic(
-            consensus, hmm_label, hurst_value, vol_regime, liquidity, structural_break
+            consensus, hmm_label, hurst_value, vol_regime, liquidity,
+            structural_break,
         )
 
         # --- Range hints (Phase 4) ---
         range_hints = self._compute_range_hints(consensus, recommended)
 
         # --- Exit mandate (Phase 4) ---
-        exit_mandate = self._evaluate_exit_mandate(consensus)
+        exit_mandate = self._evaluate_exit_mandate(
+            consensus, hurst_value, structural_break, vol_regime,
+        )
 
         # --- Build output ---
         self._previous_output = self._current_output
@@ -312,6 +326,9 @@ class RegimeManager:
             recommended_logic=recommended.value,
             exit_mandate=exit_mandate,
         )
+
+        # --- Track consensus for exit mandate grace period ---
+        self._previous_consensus = consensus
 
     # ------------------------------------------------------------------
     # Public API: .get_current_regime() / .get_json()
@@ -451,8 +468,14 @@ class RegimeManager:
         )
 
     # ------------------------------------------------------------------
-    # Recommendation & exit mandate stubs (Phase 4 will implement)
+    # Recommendation, range hints, exit mandate (Phase 4)
     # ------------------------------------------------------------------
+
+    def _compute_range_persistence(self) -> int:
+        """Count consecutive bars inside the channel."""
+        closes = np.array(self._close_buffer, dtype=float)
+        range_cfg = self._cfg.get("range_detection", {})
+        return compute_range_persistence(closes, range_cfg)
 
     def _determine_recommended_logic(
         self,
@@ -463,17 +486,56 @@ class RegimeManager:
         liquidity: LiquidityStatus,
         structural_break: bool,
     ) -> RecommendedLogic:
-        """Placeholder — returns NO_TRADE until Phase 4."""
-        return RecommendedLogic.NO_TRADE
+        """Determine recommended execution logic per v3.1 activation rules."""
+        hurst_cfg = self._cfg.get("hurst", {})
+        range_cfg = self._cfg.get("range_detection", {})
+
+        return determine_recommended_logic(
+            consensus=consensus,
+            hmm_label=hmm_label,
+            hurst_value=hurst_value,
+            vol_regime=vol_regime,
+            liquidity=liquidity,
+            structural_break=structural_break,
+            strategy_type=self._strategy_type,
+            hurst_cfg=hurst_cfg,
+            range_cfg=range_cfg,
+            range_persistence_bars=self._range_persistence,
+        )
 
     def _compute_range_hints(
         self,
         consensus: ConsensusState,
         recommended: RecommendedLogic,
     ) -> Optional[RangeHints]:
-        """Placeholder — returns None until Phase 4."""
-        return None
+        """Compute range boundary hints for range/scalp regimes."""
+        closes = np.array(self._close_buffer, dtype=float)
+        range_cfg = self._cfg.get("range_detection", {})
 
-    def _evaluate_exit_mandate(self, new_consensus: ConsensusState) -> bool:
-        """Placeholder — returns False until Phase 4."""
-        return False
+        return compute_range_hints(closes, consensus, recommended, range_cfg)
+
+    def _evaluate_exit_mandate(
+        self,
+        new_consensus: ConsensusState,
+        hurst_value: Optional[float],
+        structural_break: bool,
+        vol_regime: VolatilityRegime,
+    ) -> bool:
+        """Evaluate exit mandate with grace period and immediate triggers."""
+        exit_cfg = self._cfg.get("exit_mandate", {})
+        hurst_cfg = self._cfg.get("hurst", {})
+
+        mandate, new_counter = evaluate_exit_mandate(
+            current_consensus=new_consensus,
+            previous_consensus=self._previous_consensus,
+            shift_counter=self._shift_counter,
+            grace_bars=self._grace_bars,
+            exit_cfg=exit_cfg,
+            hurst_value=hurst_value,
+            structural_break=structural_break,
+            vol_regime=vol_regime,
+            hurst_cfg=hurst_cfg,
+        )
+
+        self._shift_counter = new_counter
+        return mandate

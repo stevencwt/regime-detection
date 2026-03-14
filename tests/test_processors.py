@@ -462,18 +462,20 @@ class TestManagerPhase3Integration:
         }
         assert set(parsed.keys()) == expected_top
 
-    def test_recommended_logic_still_stub(self):
-        """Phase 4 stub: recommended_logic should still be NO_TRADE."""
+    def test_recommended_logic_is_valid(self):
+        """Phase 4 live: recommended_logic should be a valid enum value."""
         from regime_detection import RegimeManager
+        from regime_detection.schema import RecommendedLogic
         m = RegimeManager()
         self._feed(m, 150)
         regime = m.get_current_regime()
-        assert regime["recommended_logic"] == "NO_TRADE"
+        valid = {e.value for e in RecommendedLogic}
+        assert regime["recommended_logic"] in valid
 
-    def test_exit_mandate_still_stub(self):
-        """Phase 4 stub: exit_mandate should still be False."""
+    def test_exit_mandate_is_bool(self):
+        """Phase 4 live: exit_mandate should be a boolean."""
         from regime_detection import RegimeManager
         m = RegimeManager()
         self._feed(m, 150)
         regime = m.get_current_regime()
-        assert regime["exit_mandate"] is False
+        assert isinstance(regime["exit_mandate"], bool)

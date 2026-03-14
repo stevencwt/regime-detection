@@ -143,12 +143,12 @@ class TestWarmup:
 
 
 # ---------------------------------------------------------------------------
-# Output after warmup (Phase 3: consensus is live, recommended_logic still stub)
+# Output after warmup (Phase 4: all signals, consensus, and recommendation live)
 # ---------------------------------------------------------------------------
 
 class TestOutputAfterWarmup:
     def test_consensus_computed_after_warmup(self):
-        """Phase 3: real signals + consensus produce a valid state after warmup."""
+        """Real signals + consensus + recommendation produce valid output."""
         m = RegimeManager()
         min_bars = m.config["hmm"]["min_training_bars"]
         _feed_bars(m, min_bars + 10)
@@ -156,9 +156,10 @@ class TestOutputAfterWarmup:
         regime = m.get_current_regime()
         valid_states = {"BULL_PERSISTENT", "BEAR_PERSISTENT", "CHOP_NEUTRAL", "TRANSITION", "UNKNOWN"}
         assert regime["consensus_state"] in valid_states
-        # recommended_logic still stub (Phase 4)
-        assert regime["recommended_logic"] == "NO_TRADE"
-        assert regime["exit_mandate"] is False
+        # Phase 4: recommended_logic is now live
+        valid_logic = {e.value for e in RecommendedLogic}
+        assert regime["recommended_logic"] in valid_logic
+        assert isinstance(regime["exit_mandate"], bool)
 
     def test_json_schema_keys_after_warmup(self):
         m = RegimeManager()
