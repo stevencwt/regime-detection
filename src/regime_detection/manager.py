@@ -11,7 +11,8 @@ This is the single entry-point that downstream bots interact with:
 
 Phase 1: Config, schema, bar buffer, .update()/.get_json() skeleton.
 Phase 2: Core signals wired — HMM, DFA Hurst, CPD, volatility, liquidity, funding.
-Phase 3+: Market-specific processors, consensus voting, range vs scalp.
+Phase 3: Market processors (crypto, options, pairs) + consensus voting.
+Phase 4: Range vs scalp, range hints, exit mandate.
 """
 
 from __future__ import annotations
@@ -48,6 +49,12 @@ from regime_detection.signals import (
     compute_cpd,
     compute_hmm_labels,
     compute_hurst_dfa,
+)
+from regime_detection.processors import (
+    process_crypto,
+    process_options,
+    process_pairs,
+    vote_consensus,
 )
 
 logger = logging.getLogger(__name__)
@@ -269,7 +276,7 @@ class RegimeManager:
         options_ctx = self._process_options(options_snapshot)
         pairs_ctx = self._process_pairs(spread_data)
 
-        # --- Consensus voting (Phase 4) ---
+        # --- Consensus voting (Phase 3) ---
         consensus, confidence = self._vote_consensus(
             hmm_label, hurst_value, structural_break, vol_regime, liquidity
         )
@@ -383,7 +390,7 @@ class RegimeManager:
             return LiquidityStatus.UNKNOWN
 
     # ------------------------------------------------------------------
-    # Market-specific processor stubs (Phase 3 will implement)
+    # Market-specific processors (Phase 3 — live implementations)
     # ------------------------------------------------------------------
 
     def _process_crypto(
@@ -391,29 +398,36 @@ class RegimeManager:
         funding_rate: Optional[float],
         order_book_imbalance: Optional[float],
     ) -> Optional[CryptoContext]:
-        """Placeholder — returns None until Phase 3."""
-        if self._market_type in (MarketType.CRYPTO_PERP, MarketType.CRYPTO_SPOT):
-            return CryptoContext()  # default UNKNOWN fields
-        return None
+        """Build crypto context from funding + order-book data."""
+        if self._market_type not in (MarketType.CRYPTO_PERP, MarketType.CRYPTO_SPOT):
+            return None
+
+        funding_cfg = self._cfg.get("funding", {})
+        return process_crypto(funding_rate, order_book_imbalance, funding_cfg)
 
     def _process_options(
         self, options_snapshot: Optional[Dict[str, Any]]
     ) -> Optional[OptionsContext]:
-        """Placeholder — returns None until Phase 3."""
-        if self._market_type in (MarketType.US_STOCK, MarketType.US_OPTION):
-            return OptionsContext()
-        return None
+        """Build options context from greeks/OI snapshot."""
+        if self._market_type not in (MarketType.US_STOCK, MarketType.US_OPTION):
+            return None
+
+        options_cfg = self._cfg.get("options", {})
+        return process_options(options_snapshot, options_cfg)
 
     def _process_pairs(
         self, spread_data: Optional[Dict[str, Any]]
     ) -> Optional[PairsContext]:
-        """Placeholder — returns None until Phase 3."""
-        if self._market_type == MarketType.SPREAD:
-            return PairsContext()
-        return None
+        """Build pairs context from spread series data."""
+        if self._market_type != MarketType.SPREAD:
+            return None
+
+        pairs_cfg = self._cfg.get("pairs", {})
+        hurst_cfg = self._cfg.get("hurst", {})
+        return process_pairs(spread_data, pairs_cfg, hurst_cfg)
 
     # ------------------------------------------------------------------
-    # Consensus & recommendation stubs (Phase 4 will implement)
+    # Consensus voting (Phase 3 — live implementation)
     # ------------------------------------------------------------------
 
     def _vote_consensus(
@@ -424,8 +438,21 @@ class RegimeManager:
         vol_regime: VolatilityRegime,
         liquidity: LiquidityStatus,
     ) -> tuple[ConsensusState, float]:
-        """Placeholder — returns UNKNOWN / 0.0 until Phase 4."""
-        return ConsensusState.UNKNOWN, 0.0
+        """Vote on consensus regime state from all signals."""
+        hurst_cfg = self._cfg.get("hurst", {})
+        return vote_consensus(
+            hmm_label,
+            hurst_value,
+            structural_break,
+            vol_regime,
+            liquidity,
+            hurst_cfg,
+            hmm_confidence=self._hmm_confidence,
+        )
+
+    # ------------------------------------------------------------------
+    # Recommendation & exit mandate stubs (Phase 4 will implement)
+    # ------------------------------------------------------------------
 
     def _determine_recommended_logic(
         self,

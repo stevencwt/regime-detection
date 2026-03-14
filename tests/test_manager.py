@@ -143,18 +143,20 @@ class TestWarmup:
 
 
 # ---------------------------------------------------------------------------
-# Output after warmup (Phase 1 stubs → still UNKNOWN/NO_TRADE)
+# Output after warmup (Phase 3: consensus is live, recommended_logic still stub)
 # ---------------------------------------------------------------------------
 
 class TestOutputAfterWarmup:
-    def test_stubs_produce_unknown_after_warmup(self):
-        """Phase 1: all signal stubs return defaults, so output stays UNKNOWN."""
+    def test_consensus_computed_after_warmup(self):
+        """Phase 3: real signals + consensus produce a valid state after warmup."""
         m = RegimeManager()
         min_bars = m.config["hmm"]["min_training_bars"]
         _feed_bars(m, min_bars + 10)
 
         regime = m.get_current_regime()
-        assert regime["consensus_state"] == "UNKNOWN"
+        valid_states = {"BULL_PERSISTENT", "BEAR_PERSISTENT", "CHOP_NEUTRAL", "TRANSITION", "UNKNOWN"}
+        assert regime["consensus_state"] in valid_states
+        # recommended_logic still stub (Phase 4)
         assert regime["recommended_logic"] == "NO_TRADE"
         assert regime["exit_mandate"] is False
 
