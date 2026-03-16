@@ -62,6 +62,22 @@ class LiquidityStatus(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class DriftDirection(str, Enum):
+    """Directional drift within CHOP_NEUTRAL regimes.
+
+    Distinguishes three fundamentally different sub-states:
+      UP   — choppy uptrend (higher highs/lows, price above rising SMA)
+      DOWN — choppy downtrend (lower highs/lows, price below falling SMA)
+      NONE — true range-bound / flat (price oscillates around flat SMA)
+
+    Only meaningful when consensus is CHOP_NEUTRAL. For trending regimes
+    (BULL/BEAR_PERSISTENT), the consensus already captures direction.
+    """
+    UP = "UP"
+    DOWN = "DOWN"
+    NONE = "NONE"
+
+
 class RecommendedLogic(str, Enum):
     """Downstream strategy recommendation — the key output."""
     SCALP_MEAN_REVERSION = "SCALP_MEAN_REVERSION"
@@ -126,6 +142,7 @@ class Signals:
     hurst_dfa: Optional[float] = None
     structural_break: bool = False
     liquidity_status: str = LiquidityStatus.UNKNOWN.value
+    drift_direction: str = DriftDirection.NONE.value
     crypto_context: Optional[CryptoContext] = None
     options_context: Optional[OptionsContext] = None
     pairs_context: Optional[PairsContext] = None

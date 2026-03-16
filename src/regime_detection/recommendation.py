@@ -19,6 +19,7 @@ import numpy as np
 
 from regime_detection.schema import (
     ConsensusState,
+    DriftDirection,
     HMMLabel,
     LiquidityStatus,
     RangeHints,
@@ -44,6 +45,7 @@ def determine_recommended_logic(
     hurst_cfg: Dict,
     range_cfg: Dict,
     range_persistence_bars: int = 0,
+    drift: DriftDirection = DriftDirection.NONE,
 ) -> RecommendedLogic:
     """Determine the recommended execution logic per v3.1 spec Section 5.
 
@@ -118,6 +120,7 @@ def determine_recommended_logic(
         return _classify_chop_sub_regime(
             hurst_value, vol_regime, liquidity,
             hurst_cfg, range_cfg, range_persistence_bars,
+            drift,
         )
 
     # Fallback
@@ -131,6 +134,7 @@ def _classify_chop_sub_regime(
     hurst_cfg: Dict,
     range_cfg: Dict,
     range_persistence_bars: int,
+    drift: DriftDirection = DriftDirection.NONE,
 ) -> RecommendedLogic:
     """Within CHOP_NEUTRAL, decide between SCALP and RANGE per v3.1 Section 5.
 
@@ -139,11 +143,13 @@ def _classify_chop_sub_regime(
       - Vol = LOW_STABLE or CONTRACTING
       - Liquidity = CONSOLIDATION, PASSED, or UNKNOWN (no OB data ≠ trap)
       - Range persistence >= min_bars_persistence
+      - Drift = NONE (a range with directional drift is NOT a clean range)
 
     SCALP_MEAN_REVERSION activation:
       - Hurst < range_min (0.48) — noisy chop, not clean range
       - Liquidity not a LIQUIDITY_TRAP
       - No requirement on vol stability
+      - Works with any drift direction (strategy layer handles direction filtering)
 
     Otherwise → NO_TRADE (chop but conditions not met for either)
 
@@ -161,8 +167,9 @@ def _classify_chop_sub_regime(
     hurst_in_range = range_min_h <= hurst_value <= range_max_h
     vol_stable = vol_regime in (VolatilityRegime.LOW_STABLE, VolatilityRegime.CONTRACTING)
     range_persists = range_persistence_bars >= min_persistence
+    no_drift = drift == DriftDirection.NONE
 
-    if hurst_in_range and vol_stable and liq_not_trap and range_persists:
+    if hurst_in_range and vol_stable and liq_not_trap and range_persists and no_drift:
         return RecommendedLogic.RANGE_TRADING
 
     # --- SCALP check (looser conditions) ---
@@ -385,8 +392,12 @@ def evaluate_exit_mandate(
 
     if "volatility_expanding" in triggers:
         if vol_regime == VolatilityRegime.EXPANDING:
-            if (previous_consensus == ConsensusState.CHOP_NEUTRAL and current_consensus != ConsensusState.CHOP_NEUTRAL):
-                logger.info("EXIT MANDATE: volatility EXPANDING (immediate, was CHOP)")
+            # Only fire mandate if EXPANDING vol actually changed the consensus state.
+            # If consensus stays CHOP despite EXPANDING vol (because Hurst is still
+            # sub-trending), this is normal crypto volatility — not an emergency.
+            if (previous_consensus == ConsensusState.CHOP_NEUTRAL
+                    and current_consensus != ConsensusState.CHOP_NEUTRAL):
+                logger.info("EXIT MANDATE: volatility EXPANDING + consensus shifted from CHOP")
                 return True, grace_bars
 
     # --- Grace-period triggers (consensus state change) ---

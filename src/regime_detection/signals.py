@@ -194,6 +194,73 @@ def compute_hurst_dfa(closes: np.ndarray, cfg: Dict) -> float:
 # 2. GAUSSIAN HMM — BULL / BEAR / CHOP LABELING
 # ===================================================================
 
+def _fit_hmm_with_fallback(X, n_states, cov_type, n_iter, random_state):
+    """Fit GaussianHMM with automatic fallback to fewer states.
+
+    Root cause: when data doesn't have enough structure for N states,
+    HMM assigns zero observations to one or more states. This causes:
+      - transmat_ rows summing to 0 (no transitions from empty state)
+      - predict_proba() producing NaN/inf
+      - subsequent operations crashing
+
+    Fix: after fitting, check if all states have observations.
+    If not, retry with n_states-1 (down to minimum of 2).
+
+    Returns (model, states, posteriors) or (None, None, None) on failure.
+    """
+    for n in range(n_states, 1, -1):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = GaussianHMM(
+                    n_components=n,
+                    covariance_type=cov_type,
+                    n_iter=n_iter,
+                    random_state=random_state,
+                )
+                model.fit(X)
+
+                # Check: did all states get observations?
+                states = model.predict(X)
+                state_counts = np.bincount(states, minlength=n)
+                empty_states = int(np.sum(state_counts == 0))
+
+                if empty_states > 0 and n > 2:
+                    # 3+ states with empties → retry with fewer
+                    logger.debug(
+                        "HMM %d-state has %d empty states (counts=%s), retrying with %d",
+                        n, empty_states, state_counts.tolist(), n - 1,
+                    )
+                    continue
+
+                # For 2-state: one empty state is fine — means single regime.
+                # Posteriors may have NaN for the empty state, but the populated
+                # state's posterior is valid (1.0 for all bars).
+
+                # Safe posteriors: avoid predict_proba if empty states exist
+                if empty_states > 0:
+                    # Build synthetic posteriors: 1.0 for populated state, 0.0 for empty
+                    posteriors = np.zeros((len(states), n))
+                    for i, s in enumerate(states):
+                        posteriors[i, s] = 1.0
+                else:
+                    posteriors = model.predict_proba(X)
+                    if np.any(np.isnan(posteriors)) or np.any(np.isinf(posteriors)):
+                        logger.debug("HMM %d-state posteriors contain NaN/inf, retrying with %d", n, n - 1)
+                        continue
+
+                if n < n_states:
+                    logger.debug("HMM fell back to %d states (from %d)", n, n_states)
+                return model, states, posteriors
+
+        except Exception as e:
+            logger.debug("HMM %d-state fit failed (%s), retrying with %d", n, e, n - 1)
+            continue
+
+    logger.debug("HMM fitting failed for all state counts (%d down to 2)", n_states)
+    return None, None, None
+
+
 def compute_hmm_labels(
     closes: np.ndarray,
     cfg: Dict,
@@ -244,8 +311,9 @@ def compute_hmm_labels(
         return "UNKNOWN", np.array([]), 0.0
 
     # --- Guard: near-zero variance (stale/flat data) ---
-    # When consecutive prices are identical (e.g., BBO polling), log-returns
-    # are ~0.0 and the HMM cannot differentiate states meaningfully.
+    # When log-returns have near-zero variance (identical consecutive prices,
+    # stale BBO data), HMM fitting is meaningless. This catches genuinely
+    # flat data, NOT the SOL/ETH HTF issue which is caused by empty HMM states.
     return_std = np.std(log_returns)
     if return_std < 1e-10:
         logger.debug("HMM: near-zero return variance (%.2e) — defaulting to CHOP", return_std)
@@ -254,24 +322,49 @@ def compute_hmm_labels(
     X = log_returns.reshape(-1, 1)
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model = GaussianHMM(
-                n_components=n_states,
-                covariance_type=cov_type,
-                n_iter=n_iter,
-                random_state=random_state,
+        # Suppress hmmlearn's logger during fitting (convergence warnings).
+        import logging as _logging
+        _hmm_logger = _logging.getLogger("hmmlearn.base")
+        _prev_level = _hmm_logger.level
+        _hmm_logger.setLevel(_logging.ERROR)
+        try:
+            model, states, posteriors = _fit_hmm_with_fallback(
+                X, n_states, cov_type, n_iter, random_state
             )
-            model.fit(X)
-            states = model.predict(X)
-            posteriors = model.predict_proba(X)
+        finally:
+            _hmm_logger.setLevel(_prev_level)
+
+        if model is None:
+            return "UNKNOWN", np.array([]), 0.0
 
     except Exception as e:
-        logger.warning("HMM fitting failed: %s", e)
+        logger.debug("HMM fitting failed: %s", e)
         return "UNKNOWN", np.array([]), 0.0
 
     # --- Auto-label states by mean return ---
     means = model.means_.flatten()  # shape (n_states,)
+
+    # --- Guard: empty states from fallback ---
+    # When 2-state HMM has one empty state, the unpopulated state's mean is
+    # random noise from initialization. Skip ranking-based labeling and use
+    # the populated state's mean sign directly.
+    state_counts = np.bincount(states, minlength=len(means))
+    if np.any(state_counts == 0):
+        # Only consider means of populated states
+        populated_mask = state_counts > 0
+        populated_means = means[populated_mask]
+        avg_mean = np.mean(populated_means)
+        if avg_mean > return_std * 0.3:
+            fallback_label = "BULL"
+        elif avg_mean < -return_std * 0.3:
+            fallback_label = "BEAR"
+        else:
+            fallback_label = "CHOP"
+        logger.debug(
+            "HMM: empty states detected (counts=%s), populated mean=%.2e → %s",
+            state_counts.tolist(), avg_mean, fallback_label,
+        )
+        return fallback_label, states, float(posteriors[-1, states[-1]])
 
     # --- Guard: means separation check ---
     # If all state means are nearly identical, the HMM cannot distinguish
@@ -529,3 +622,134 @@ def classify_funding_bias(
     else:
         # Between neutral and extreme — still call it neutral
         return "NEUTRAL"
+
+
+# ===================================================================
+# 7. DRIFT DIRECTION — Directional Bias within CHOP Regimes
+# ===================================================================
+
+def compute_drift(
+    closes: np.ndarray,
+    cfg: Dict,
+) -> str:
+    """Detect directional drift within a CHOP_NEUTRAL regime.
+
+    Distinguishes three sub-states that CHOP_NEUTRAL lumps together:
+
+      UP   — choppy uptrend: price oscillates with upward bias
+             (higher highs/lows, price consistently above rising SMA)
+      DOWN — choppy downtrend: price oscillates with downward bias
+             (lower highs/lows, price consistently below falling SMA)
+      NONE — true range-bound: price oscillates around flat SMA
+             (no directional bias, classic rectangle/channel)
+
+    Two detection methods (either can trigger):
+
+    Method 1 — SMA-based (slow, stable, catches sustained drift):
+      1. Compute SMA(sma_period) over close prices
+      2. Compute SMA slope: % change over last slope_window bars
+      3. Compute price-above-SMA: fraction of last sma_period bars where close > SMA
+      4. Classify using two-tier thresholds:
+         - Strong: above_pct >= 0.80 → UP (or <= 0.20 → DOWN)
+         - Moderate: above_pct >= 0.65 AND slope confirms → UP/DOWN
+
+    Method 2 — Swing structure (fast, catches developing trends):
+      1. Identify local swing highs and lows over a short window
+      2. Count consecutive higher-lows (HH/HL) or lower-highs (LH/LL)
+      3. If min_swing_count consecutive swings confirm direction → drift detected
+
+    Parameters
+    ----------
+    closes : 1-D array of close prices (oldest → newest)
+    cfg : drift config section with thresholds
+
+    Returns
+    -------
+    str : "UP", "DOWN", or "NONE"
+    """
+    sma_period = cfg.get("sma_period", 50)
+    slope_window = cfg.get("slope_window", 10)
+    strong_above_pct = cfg.get("strong_above_pct", 0.80)
+    moderate_above_pct = cfg.get("moderate_above_pct", 0.65)
+    min_slope_pct = cfg.get("min_slope_pct", 0.15)
+    swing_lookback = cfg.get("swing_lookback", 20)
+    swing_order = cfg.get("swing_order", 3)
+    min_swing_count = cfg.get("min_swing_count", 2)
+
+    if len(closes) < max(sma_period + slope_window, swing_lookback + 10):
+        return "NONE"
+
+    # ===================================================================
+    # Method 1: SMA-based (slow, stable)
+    # ===================================================================
+    sma = np.convolve(closes, np.ones(sma_period) / sma_period, mode='valid')
+    sma_result = "NONE"
+    if len(sma) >= slope_window + 1:
+        sma_now = sma[-1]
+        sma_back = sma[-slope_window]
+        if sma_back > 0:
+            slope_pct = (sma_now - sma_back) / sma_back * 100.0
+
+            n_sma = len(sma)
+            aligned_closes = closes[-n_sma:]
+            lookback = min(sma_period, n_sma)
+            recent_closes = aligned_closes[-lookback:]
+            recent_sma = sma[-lookback:]
+            above_count = int(np.sum(recent_closes > recent_sma))
+            above_pct = above_count / lookback
+
+            if above_pct >= strong_above_pct:
+                sma_result = "UP"
+            elif above_pct <= (1.0 - strong_above_pct):
+                sma_result = "DOWN"
+            elif above_pct >= moderate_above_pct and slope_pct > min_slope_pct:
+                sma_result = "UP"
+            elif above_pct <= (1.0 - moderate_above_pct) and slope_pct < -min_slope_pct:
+                sma_result = "DOWN"
+
+    if sma_result != "NONE":
+        return sma_result
+
+    # ===================================================================
+    # Method 2: Swing structure (fast, catches developing trends)
+    # ===================================================================
+    # Find local swing highs and lows in the recent window.
+    # A swing low is a bar where close is lower than `swing_order` bars
+    # on each side. A swing high is the opposite.
+    recent = closes[-swing_lookback:]
+    swing_lows = []
+    swing_highs = []
+    for i in range(swing_order, len(recent) - swing_order):
+        window_left = recent[i - swing_order:i]
+        window_right = recent[i + 1:i + 1 + swing_order]
+        # Swing low: lower than all neighbors
+        if recent[i] <= np.min(window_left) and recent[i] <= np.min(window_right):
+            swing_lows.append((i, recent[i]))
+        # Swing high: higher than all neighbors
+        if recent[i] >= np.max(window_left) and recent[i] >= np.max(window_right):
+            swing_highs.append((i, recent[i]))
+
+    # Count consecutive higher lows (bullish structure)
+    higher_lows = 0
+    if len(swing_lows) >= 2:
+        for j in range(1, len(swing_lows)):
+            if swing_lows[j][1] > swing_lows[j - 1][1]:
+                higher_lows += 1
+            else:
+                higher_lows = 0  # reset on break
+
+    # Count consecutive lower highs (bearish structure)
+    lower_highs = 0
+    if len(swing_highs) >= 2:
+        for j in range(1, len(swing_highs)):
+            if swing_highs[j][1] < swing_highs[j - 1][1]:
+                lower_highs += 1
+            else:
+                lower_highs = 0  # reset on break
+
+    if higher_lows >= min_swing_count:
+        return "UP"
+    elif lower_highs >= min_swing_count:
+        return "DOWN"
+
+    return "NONE"

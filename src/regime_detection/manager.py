@@ -29,6 +29,7 @@ from regime_detection.config import load_config, validate_config
 from regime_detection.schema import (
     ConsensusState,
     CryptoContext,
+    DriftDirection,
     FundingBias,
     HMMLabel,
     LiquidityStatus,
@@ -47,6 +48,7 @@ from regime_detection.signals import (
     classify_liquidity,
     classify_volatility,
     compute_cpd,
+    compute_drift,
     compute_hmm_labels,
     compute_hurst_dfa,
 )
@@ -291,11 +293,14 @@ class RegimeManager:
             hmm_label, hurst_value, structural_break, vol_regime, liquidity
         )
 
+        # --- Drift detection (Phase 5: directional bias within CHOP) ---
+        drift = self._compute_drift(consensus)
+
         # --- Recommended logic (Phase 4: range vs scalp) ---
         self._range_persistence = self._compute_range_persistence()
         recommended = self._determine_recommended_logic(
             consensus, hmm_label, hurst_value, vol_regime, liquidity,
-            structural_break,
+            structural_break, drift,
         )
 
         # --- Range hints (Phase 4) ---
@@ -318,6 +323,7 @@ class RegimeManager:
                 hurst_dfa=hurst_value,
                 structural_break=structural_break,
                 liquidity_status=liquidity.value,
+                drift_direction=drift.value,
                 crypto_context=crypto_ctx,
                 options_context=options_ctx,
                 pairs_context=pairs_ctx,
@@ -477,6 +483,20 @@ class RegimeManager:
         range_cfg = self._cfg.get("range_detection", {})
         return compute_range_persistence(closes, range_cfg)
 
+    def _compute_drift(self, consensus: ConsensusState) -> DriftDirection:
+        """Compute directional drift within CHOP_NEUTRAL regimes.
+
+        Only meaningful when consensus is CHOP_NEUTRAL — trending regimes
+        already have direction captured in the consensus state itself.
+        """
+        if consensus != ConsensusState.CHOP_NEUTRAL:
+            return DriftDirection.NONE
+
+        closes = np.array(self._close_buffer, dtype=float)
+        drift_cfg = self._cfg.get("drift", {})
+        result = compute_drift(closes, drift_cfg)
+        return DriftDirection(result)
+
     def _determine_recommended_logic(
         self,
         consensus: ConsensusState,
@@ -485,6 +505,7 @@ class RegimeManager:
         vol_regime: VolatilityRegime,
         liquidity: LiquidityStatus,
         structural_break: bool,
+        drift: DriftDirection = DriftDirection.NONE,
     ) -> RecommendedLogic:
         """Determine recommended execution logic per v3.1 activation rules."""
         hurst_cfg = self._cfg.get("hurst", {})
@@ -501,6 +522,7 @@ class RegimeManager:
             hurst_cfg=hurst_cfg,
             range_cfg=range_cfg,
             range_persistence_bars=self._range_persistence,
+            drift=drift,
         )
 
     def _compute_range_hints(

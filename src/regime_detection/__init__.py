@@ -13,6 +13,7 @@ Public API:
 from regime_detection.manager import RegimeManager
 from regime_detection.schema import (
     ConsensusState,
+    DriftDirection,
     HMMLabel,
     LiquidityStatus,
     MarketType,
@@ -27,6 +28,7 @@ __all__ = [
     "RegimeManager",
     "RegimeOutput",
     "ConsensusState",
+    "DriftDirection",
     "MarketType",
     "VolatilityRegime",
     "HMMLabel",

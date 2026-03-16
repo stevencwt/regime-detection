@@ -88,7 +88,7 @@ hurst:
   order: 1                           # polynomial order for DFA
 
   # Regime thresholds (Section 4 of spec)
-  trending_threshold: 0.55           # H >= 0.60 → trending
+  trending_threshold: 0.55           # H >= 0.55 → trending (lowered from 0.60 for 5m crypto)
   mean_reverting_threshold: 0.40     # H <= 0.40 → strong mean-reversion
   random_walk_center: 0.50
 
@@ -132,6 +132,20 @@ range_detection:
   min_bars_persistence: 10           # price must stay inside channel for N bars
   deviation_entry_threshold: 1.5     # SD from range mean for entry hint
   target_range_capture_pct: 0.6      # target 60% of range width
+
+# --- Drift Detection Settings -----------------------------------------------
+# Detects directional bias within CHOP_NEUTRAL regimes.
+# Distinguishes "choppy uptrend" (UP) / "choppy downtrend" (DOWN) / "true range" (NONE).
+drift:
+  sma_period: 50                     # SMA window for drift computation
+  slope_window: 10                   # bars to measure SMA slope direction
+  strong_above_pct: 0.80             # 80%+ bars above SMA → strong drift UP
+  moderate_above_pct: 0.65           # 65%+ bars above SMA (needs slope confirm) → moderate drift UP
+  min_slope_pct: 0.15                # minimum SMA slope % to confirm moderate drift
+  # Fast swing structure detection (catches developing trends before SMA confirms)
+  swing_lookback: 20                 # bars to scan for swing highs/lows
+  swing_order: 3                     # bars on each side to define a swing point
+  min_swing_count: 2                 # consecutive higher-lows (or lower-highs) needed
 
 # --- Regime Shift / Exit Mandate Settings -----------------------------------
 exit_mandate:
