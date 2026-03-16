@@ -88,13 +88,13 @@ hurst:
   order: 1                           # polynomial order for DFA
 
   # Regime thresholds (Section 4 of spec)
-  trending_threshold: 0.60           # H >= 0.60 → trending
+  trending_threshold: 0.55           # H >= 0.60 → trending
   mean_reverting_threshold: 0.40     # H <= 0.40 → strong mean-reversion
   random_walk_center: 0.50
 
   # Range trading sweet spot
   range_min_hurst: 0.48
-  range_max_hurst: 0.58
+  range_max_hurst: 0.54
 
 # --- Change Point Detection (CPD) Settings ----------------------------------
 cpd:

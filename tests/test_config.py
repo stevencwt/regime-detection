@@ -51,8 +51,8 @@ class TestLoadDefaultConfig:
         cfg = load_default_config()
         h = cfg["hurst"]
         assert h["range_min_hurst"] == 0.48
-        assert h["range_max_hurst"] == 0.58
-        assert h["trending_threshold"] == 0.60
+        assert h["range_max_hurst"] == 0.54
+        assert h["trending_threshold"] == 0.55
 
     def test_temporal_matrix_has_all_strategies(self):
         cfg = load_default_config()

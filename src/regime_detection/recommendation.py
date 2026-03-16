@@ -137,42 +137,46 @@ def _classify_chop_sub_regime(
     RANGE_TRADING activation (all must be true):
       - Hurst in [range_min, range_max] (0.48–0.58 sweet spot)
       - Vol = LOW_STABLE or CONTRACTING
-      - Liquidity = CONSOLIDATION or PASSED
+      - Liquidity = CONSOLIDATION, PASSED, or UNKNOWN (no OB data ≠ trap)
       - Range persistence >= min_bars_persistence
 
     SCALP_MEAN_REVERSION activation:
       - Hurst < range_min (0.48) — noisy chop, not clean range
-      - Liquidity = CONSOLIDATION (not a trap)
+      - Liquidity not a LIQUIDITY_TRAP
       - No requirement on vol stability
 
     Otherwise → NO_TRADE (chop but conditions not met for either)
+
+    Note: UNKNOWN liquidity (no order-book data available) is treated as
+    non-blocking. Only an explicit LIQUIDITY_TRAP blocks trading.
     """
     range_min_h = hurst_cfg.get("range_min_hurst", 0.48)
     range_max_h = hurst_cfg.get("range_max_hurst", 0.58)
     min_persistence = range_cfg.get("min_bars_persistence", 10)
 
+    # Liquidity checks: UNKNOWN = no data, not a trap → non-blocking
+    liq_not_trap = liquidity != LiquidityStatus.LIQUIDITY_TRAP
+
     # --- RANGE TRADING check (stricter conditions) ---
     hurst_in_range = range_min_h <= hurst_value <= range_max_h
     vol_stable = vol_regime in (VolatilityRegime.LOW_STABLE, VolatilityRegime.CONTRACTING)
-    liq_ok = liquidity in (LiquidityStatus.CONSOLIDATION, LiquidityStatus.PASSED)
     range_persists = range_persistence_bars >= min_persistence
 
-    if hurst_in_range and vol_stable and liq_ok and range_persists:
+    if hurst_in_range and vol_stable and liq_not_trap and range_persists:
         return RecommendedLogic.RANGE_TRADING
 
     # --- SCALP check (looser conditions) ---
     hurst_below_range = hurst_value < range_min_h
-    liq_consolidation = liquidity == LiquidityStatus.CONSOLIDATION
 
-    if hurst_below_range and liq_consolidation:
+    if hurst_below_range and liq_not_trap:
         return RecommendedLogic.SCALP_MEAN_REVERSION
 
     # --- Hurst in range sweet spot but persistence not met yet ---
     # Could be developing range — allow scalping as interim
-    if hurst_in_range and liq_ok:
+    if hurst_in_range and liq_not_trap:
         return RecommendedLogic.SCALP_MEAN_REVERSION
 
-    # --- Neither scalp nor range conditions met ---
+    # --- LIQUIDITY_TRAP or other blocking condition ---
     return RecommendedLogic.NO_TRADE
 
 
@@ -381,7 +385,7 @@ def evaluate_exit_mandate(
 
     if "volatility_expanding" in triggers:
         if vol_regime == VolatilityRegime.EXPANDING:
-            if previous_consensus == ConsensusState.CHOP_NEUTRAL:
+            if (previous_consensus == ConsensusState.CHOP_NEUTRAL and current_consensus != ConsensusState.CHOP_NEUTRAL):
                 logger.info("EXIT MANDATE: volatility EXPANDING (immediate, was CHOP)")
                 return True, grace_bars
 

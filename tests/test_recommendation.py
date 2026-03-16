@@ -425,14 +425,14 @@ class TestExitMandate:
         assert mandate is True
 
     def test_expanding_vol_from_chop_immediate(self):
-        """EXPANDING vol when previous was CHOP → immediate mandate."""
+        """EXPANDING vol but consensus stays CHOP → no mandate (normal crypto vol)."""
         mandate, counter = evaluate_exit_mandate(
             ConsensusState.CHOP_NEUTRAL, ConsensusState.CHOP_NEUTRAL,
             shift_counter=0, grace_bars=5, exit_cfg=EXIT_CFG,
             hurst_value=0.50, structural_break=False,
             vol_regime=VolatilityRegime.EXPANDING, hurst_cfg=HURST_CFG,
         )
-        assert mandate is True
+        assert mandate is False
 
     def test_disabled_exit_mandate(self):
         """exit_mandate.enabled=false → never trigger."""
